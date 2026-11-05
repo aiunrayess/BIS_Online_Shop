@@ -103,7 +103,7 @@ Create an administrator with a unique password after applying migrations:
 python configdrf/manage.py createsuperuser
 ~~~
 
-For a disposable local demonstration, create the four operational role accounts with a password you choose. The command never contains or generates a default credential, and it never overwrites an existing account:
+For a disposable local demonstration, create Buyer, Seller, Sales Manager, Warehouse Staff, Head Manager, and Security Manager accounts with a password you choose. The command never contains or generates a default credential, and it never overwrites an existing account:
 
 ~~~bash
 python configdrf/manage.py bootstrap_demo_accounts

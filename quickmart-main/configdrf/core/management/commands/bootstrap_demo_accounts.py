@@ -34,6 +34,8 @@ class Command(BaseCommand):
             raise CommandError('Use a plain domain such as quickmart.test.')
 
         accounts = (
+            ('buyer.demo', 'Demo', 'Buyer', User.ROLE_BUYER),
+            ('seller.demo', 'Demo', 'Seller', User.ROLE_SELLER),
             ('head.manager', 'Head', 'Manager', User.ROLE_HEAD_MANAGER),
             ('security.manager', 'Security', 'Manager', User.ROLE_SECURITY_MANAGER),
             ('sales.manager', 'Sales', 'Manager', User.ROLE_MANAGER),
