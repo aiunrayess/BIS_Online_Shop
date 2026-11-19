@@ -22,8 +22,12 @@ import { CartService } from '../../services/cart.service';
           <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Home</a>
           <a routerLink="/products" routerLinkActive="active">Catalog</a>
           <a routerLink="/categories" routerLinkActive="active">Categories</a>
+          <a routerLink="/top-products" routerLinkActive="active">Top products</a>
           <ng-container *ngIf="user$ | async as user">
             <a routerLink="/orders" routerLinkActive="active">Orders</a>
+            <a *ngIf="hasRole(user, 'buyer', 'seller')" routerLink="/saved" routerLinkActive="active">Saved</a>
+            <a routerLink="/notifications" routerLinkActive="active">Alerts</a>
+            <a routerLink="/support" routerLinkActive="active">Support</a>
             <a routerLink="/profile" routerLinkActive="active">Profile</a>
             <a *ngIf="hasRole(user, 'seller')" routerLink="/sell" routerLinkActive="active">Sell</a>
             <a *ngIf="hasRole(user, 'seller')" routerLink="/seller/listings" routerLinkActive="active">My listings</a>

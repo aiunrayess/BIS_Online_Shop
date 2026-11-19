@@ -2,6 +2,7 @@ import uuid
 
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.validators import MaxValueValidator, MinValueValidator
 
 # Create your models here.
 
@@ -127,6 +128,213 @@ class Product(models.Model):
             models.CheckConstraint(condition=models.Q(stock_qty__gte=0), name="product_stock_nonnegative"),
             models.CheckConstraint(condition=~models.Q(sku=''), name="product_sku_nonempty"),
         ]
+
+
+class ProductReview(models.Model):
+    """One customer review per product, with a deliberately small public footprint."""
+
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='reviews',
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='product_reviews',
+    )
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+    )
+    comment = models.TextField(max_length=1000, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ('-created_at', '-id')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('user', 'product'),
+                name='unique_review_per_user_product',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(rating__gte=1, rating__lte=5),
+                name='product_review_rating_range',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=('product', '-created_at'), name='core_review_product_date_idx'),
+            models.Index(fields=('user', '-created_at'), name='core_review_user_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.rating}/5 review for {self.product_id} by {self.user_id}"
+
+
+class WishlistItem(models.Model):
+    """A customer's saved products. It is intentionally independent of stock."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='wishlist_items',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='wishlist_items',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-created_at', '-id')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('user', 'product'),
+                name='unique_wishlist_item_per_user_product',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=('user', '-created_at'), name='core_wish_user_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"Wishlist item {self.product_id} for {self.user_id}"
+
+
+class WaitlistItem(models.Model):
+    """An opt-in stock alert. Deactivation after notification prevents duplicates."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='waitlist_items',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='waitlist_items',
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ('-created_at', '-id')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('user', 'product'),
+                name='unique_waitlist_item_per_user_product',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=('product', 'is_active'), name='core_wait_product_active_idx'),
+            models.Index(fields=('user', '-created_at'), name='core_wait_user_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"Waitlist item {self.product_id} for {self.user_id}"
+
+
+class CustomerNotification(models.Model):
+    """In-app notifications that never include sensitive transactional details."""
+
+    TYPE_WAITLIST_PRODUCT_AVAILABLE = 'waitlist_product_available'
+    TYPE_SUPPORT_TICKET_UPDATED = 'support_ticket_updated'
+    TYPE_CHOICES = (
+        (TYPE_WAITLIST_PRODUCT_AVAILABLE, 'Waitlisted product available'),
+        (TYPE_SUPPORT_TICKET_UPDATED, 'Support ticket updated'),
+    )
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='customer_notifications',
+    )
+    notification_type = models.CharField(max_length=64, choices=TYPE_CHOICES)
+    title = models.CharField(max_length=160)
+    message = models.CharField(max_length=500)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ('-created_at', '-id')
+        indexes = [
+            models.Index(fields=('user', 'is_read', '-created_at'), name='core_notice_user_read_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.notification_type} for {self.user_id}"
+
+
+class SupportTicket(models.Model):
+    """Customer support requests with a traceable, staff-owned resolution workflow."""
+
+    STATUS_OPEN = 'Open'
+    STATUS_IN_PROGRESS = 'In Progress'
+    STATUS_RESOLVED = 'Resolved'
+    STATUS_CLOSED = 'Closed'
+    STATUS_CHOICES = (
+        (STATUS_OPEN, 'Open'),
+        (STATUS_IN_PROGRESS, 'In Progress'),
+        (STATUS_RESOLVED, 'Resolved'),
+        (STATUS_CLOSED, 'Closed'),
+    )
+    CATEGORY_GENERAL = 'general'
+    CATEGORY_ORDER = 'order'
+    CATEGORY_PRODUCT = 'product'
+    CATEGORY_ACCOUNT = 'account'
+    CATEGORY_TECHNICAL = 'technical'
+    CATEGORY_CHOICES = (
+        (CATEGORY_GENERAL, 'General'),
+        (CATEGORY_ORDER, 'Order'),
+        (CATEGORY_PRODUCT, 'Product'),
+        (CATEGORY_ACCOUNT, 'Account'),
+        (CATEGORY_TECHNICAL, 'Technical'),
+    )
+
+    customer = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='support_tickets',
+    )
+    handled_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='handled_support_tickets',
+    )
+    subject = models.CharField(max_length=160)
+    message = models.TextField(max_length=4000)
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES,
+        default=CATEGORY_GENERAL,
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    response = models.TextField(max_length=4000, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ('-updated_at', '-id')
+        indexes = [
+            models.Index(fields=('customer', 'status', '-created_at'), name='core_ticket_customer_idx'),
+            models.Index(fields=('status', '-updated_at'), name='core_ticket_status_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"Support ticket #{self.pk}: {self.subject}"
 
 class Order(models.Model):
     STATUS_CHOICES = (

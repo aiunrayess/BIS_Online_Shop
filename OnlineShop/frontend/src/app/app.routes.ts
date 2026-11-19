@@ -17,14 +17,22 @@ import { SecurityComponent } from './pages/security/security';
 import { SellComponent } from './pages/sell/sell';
 import { SellerListingsComponent } from './pages/seller-listings/seller-listings';
 import { UserManagementComponent } from './pages/user-management/user-management';
+import { TopProductsComponent } from './pages/top-products/top-products';
+import { SavedListsComponent } from './pages/saved-lists/saved-lists';
+import { NotificationsComponent } from './pages/notifications/notifications';
+import { SupportComponent } from './pages/support/support';
 
 export const routes: Routes = [
   { path: '', component: HomeComponent, title: 'Online Shop | Home' },
   { path: 'products', component: ProductsComponent, title: 'Online Shop | Catalogue' },
   { path: 'products/:id', component: ProductDetailComponent, title: 'Online Shop | Product' },
+  { path: 'top-products', component: TopProductsComponent, title: 'Online Shop | Top Products' },
   { path: 'categories', component: CategoriesComponent, title: 'Online Shop | Categories' },
   { path: 'cart', component: CartComponent, title: 'Online Shop | Cart' },
   { path: 'orders', component: OrdersComponent, canActivate: [authGuard], title: 'Online Shop | My Orders' },
+  { path: 'saved', component: SavedListsComponent, canActivate: [roleGuard('buyer', 'seller')], title: 'Online Shop | Wishlist and Waitlist' },
+  { path: 'notifications', component: NotificationsComponent, canActivate: [authGuard], title: 'Online Shop | Notifications' },
+  { path: 'support', component: SupportComponent, canActivate: [authGuard], title: 'Online Shop | Client Support' },
   { path: 'profile', component: ProfileComponent, canActivate: [authGuard], title: 'Online Shop | My Profile' },
   { path: 'sell', component: SellComponent, canActivate: [roleGuard('seller')], title: 'Online Shop | New Listing' },
   { path: 'seller/listings', component: SellerListingsComponent, canActivate: [roleGuard('seller')], title: 'Online Shop | My Listings' },

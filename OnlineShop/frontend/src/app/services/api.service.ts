@@ -2,13 +2,18 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import {
+  AppNotification,
   AuditLogEntry,
   Category,
   DashboardOverview,
   Order,
   PagedResponse,
   Product,
+  ProductReview,
   SalesReportRow,
+  SavedProductItem,
+  SupportTicket,
+  SupportTicketStatus,
   User,
   UserRole,
 } from '../models/api.models';
@@ -44,6 +49,28 @@ export class ApiService {
 
   getProduct(id: number): Observable<Product> {
     return this.http.get<Product>(`${this.baseUrl}/products/${id}/`);
+  }
+
+  getTopProducts(limit = 10): Observable<Collection<Product>> {
+    return this.http.get<Collection<Product>>(`${this.baseUrl}/products/top/`, {
+      params: this.toParams({ limit: Math.max(1, Math.min(50, Math.floor(limit) || 10)) }),
+    });
+  }
+
+  getProductReviews(productId: number): Observable<Collection<ProductReview>> {
+    return this.http.get<Collection<ProductReview>>(`${this.baseUrl}/products/${productId}/reviews/`);
+  }
+
+  createProductReview(productId: number, review: { rating: number; comment?: string }): Observable<ProductReview> {
+    return this.http.post<ProductReview>(`${this.baseUrl}/products/${productId}/reviews/`, review);
+  }
+
+  updateProductReview(productId: number, reviewId: number, review: { rating: number; comment?: string }): Observable<ProductReview> {
+    return this.http.patch<ProductReview>(`${this.baseUrl}/products/${productId}/reviews/${reviewId}/`, review);
+  }
+
+  deleteProductReview(productId: number, reviewId: number): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/products/${productId}/reviews/${reviewId}/`);
   }
 
   getCategoryProducts(categoryId: number): Observable<Product[]> {
@@ -91,6 +118,50 @@ export class ApiService {
     return this.http.get<Collection<Order>>(`${this.baseUrl}/orders/`);
   }
 
+  getWishlist(): Observable<Collection<SavedProductItem>> {
+    return this.http.get<Collection<SavedProductItem>>(`${this.baseUrl}/wishlist/`);
+  }
+
+  addToWishlist(productId: number): Observable<SavedProductItem> {
+    return this.http.post<SavedProductItem>(`${this.baseUrl}/wishlist/`, { product: productId });
+  }
+
+  removeFromWishlist(productId: number): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/wishlist/${productId}/`);
+  }
+
+  getWaitlist(): Observable<Collection<SavedProductItem>> {
+    return this.http.get<Collection<SavedProductItem>>(`${this.baseUrl}/waitlist/`);
+  }
+
+  addToWaitlist(productId: number): Observable<SavedProductItem> {
+    return this.http.post<SavedProductItem>(`${this.baseUrl}/waitlist/`, { product: productId });
+  }
+
+  removeFromWaitlist(productId: number): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/waitlist/${productId}/`);
+  }
+
+  getNotifications(): Observable<Collection<AppNotification>> {
+    return this.http.get<Collection<AppNotification>>(`${this.baseUrl}/notifications/`);
+  }
+
+  markNotificationRead(notificationId: number): Observable<AppNotification> {
+    return this.http.patch<AppNotification>(`${this.baseUrl}/notifications/${notificationId}/read/`, {});
+  }
+
+  getSupportTickets(): Observable<Collection<SupportTicket>> {
+    return this.http.get<Collection<SupportTicket>>(`${this.baseUrl}/support-tickets/`);
+  }
+
+  createSupportTicket(ticket: { subject: string; message: string; category?: string }): Observable<SupportTicket> {
+    return this.http.post<SupportTicket>(`${this.baseUrl}/support-tickets/`, ticket);
+  }
+
+  updateSupportTicket(ticketId: number, update: { status: SupportTicketStatus; response?: string }): Observable<SupportTicket> {
+    return this.http.patch<SupportTicket>(`${this.baseUrl}/support-tickets/${ticketId}/`, update);
+  }
+
   getOrder(id: number): Observable<Order> {
     return this.http.get<Order>(`${this.baseUrl}/orders/${id}/`);
   }
@@ -134,8 +205,11 @@ export class ApiService {
     return this.http.post<User>(`${this.baseUrl}/users/`, user);
   }
 
-  updateUserRole(userId: number, role: UserRole): Observable<User> {
-    return this.http.patch<User>(`${this.baseUrl}/users/${userId}/role/`, { role });
+  updateUserRole(userId: number, role: UserRole, reason?: string): Observable<User> {
+    return this.http.patch<User>(`${this.baseUrl}/users/${userId}/role/`, {
+      role,
+      ...(reason?.trim() ? { reason: reason.trim() } : {}),
+    });
   }
 
   updateUserStatus(userId: number, isActive: boolean, reason: string): Observable<User> {

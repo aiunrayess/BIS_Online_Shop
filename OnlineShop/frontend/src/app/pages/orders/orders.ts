@@ -13,7 +13,7 @@ import { AuthService } from '../../services/auth.service';
       <h1>My Orders</h1>
       <p *ngIf="message" class="status-feedback" [class.success]="messageType === 'success'" [class.error]="messageType === 'error'" role="status">{{message}}</p>
       <p *ngIf="loading" class="loading"><span class="loading-indicator" aria-hidden="true"></span>Loading orders…</p>
-      <p class="demo-note">Payments are simulated for this demo. Full card details stay in the browser and are never stored or sent.</p>
+      <p class="demo-note">Payments are simulated for this demo. Full card details stay in the browser and are never stored or sent. If you cancel a new order, its products are kept in your wishlist so you can easily buy them later.</p>
       <article class="order-card" *ngFor="let order of orders">
         <div class="order-heading">
           <h2>Order #{{order.id}}</h2>
@@ -29,7 +29,7 @@ import { AuthService } from '../../services/auth.service';
           <strong>{{order.total_amount | number:'1.2-2'}} KZT</strong>
         </div>
         <button *ngIf="order.status === 'New'" class="btn btn-outline" (click)="cancel(order)">
-          Cancel order
+          Cancel order and save items
         </button>
       </article>
       <p *ngIf="!loading && orders.length === 0">You have not placed any orders yet.</p>
@@ -78,7 +78,7 @@ export class OrdersComponent implements OnInit {
   cancel(order: any) {
     this.api.cancelOrder(order.id).subscribe({
       next: () => {
-        this.message = `Order #${order.id} cancelled and stock returned.`;
+        this.message = `Order #${order.id} cancelled, stock returned, and its products were saved to your wishlist.`;
         this.messageType = 'success';
         this.loadOrders();
         this.cdr.detectChanges();

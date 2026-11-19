@@ -46,6 +46,69 @@ export interface Product {
   category_name?: string;
   owner?: number | null;
   is_active?: boolean;
+  /** Aggregate review values returned by the catalogue, detail, and top-products APIs. */
+  average_rating?: number;
+  rating_count?: number;
+  units_sold?: number;
+}
+
+export interface ReviewAuthor {
+  id: number;
+  /** Customer e-mail is intentionally omitted from public review/ticket data. */
+  email?: string;
+  first_name?: string;
+  last_name?: string;
+}
+
+export interface ProductReview {
+  id: number;
+  product: number;
+  rating: number;
+  comment?: string;
+  user: ReviewAuthor;
+  created_at: string;
+  updated_at?: string;
+  is_owner: boolean;
+}
+
+export interface SavedProductItem {
+  id: number;
+  product: number;
+  product_detail?: Product | null;
+  created_at: string;
+  /** Present for wishlist records when an out-of-stock product also entered the waitlist. */
+  waitlisted?: boolean;
+  /** Waitlist entries become inactive once their one-time restock alert is sent. */
+  is_active?: boolean;
+  notified_at?: string | null;
+}
+
+export interface AppNotification {
+  id: number;
+  type: string;
+  title: string;
+  message: string;
+  product?: number | null;
+  product_detail?: Product | null;
+  is_read: boolean;
+  created_at: string;
+  read_at?: string | null;
+}
+
+export type SupportTicketStatus = 'Open' | 'In Progress' | 'Resolved' | 'Closed';
+
+export interface SupportTicket {
+  id: number;
+  subject: string;
+  message: string;
+  category?: string;
+  status: SupportTicketStatus;
+  response?: string | null;
+  customer?: ReviewAuthor | null;
+  handled_by?: ReviewAuthor | null;
+  created_at: string;
+  updated_at?: string;
+  resolved_at?: string | null;
 }
 
 export type PaymentMethod = 'card' | 'bank_transfer' | 'cash_on_delivery';

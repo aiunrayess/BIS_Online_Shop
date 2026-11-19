@@ -12,8 +12,8 @@ import { apiErrorMessage, collectionItems } from '../../utils/http';
   imports: [CommonModule, FormsModule],
   template: `
     <main class="page container">
-      <header><div><p class="eyebrow">Access management</p><h1>People and roles</h1><p>{{ canManageRoles ? 'Create operational accounts and assign day-to-day roles.' : 'Review account availability and protect access.' }}</p></div><button type="button" class="btn btn-secondary" (click)="load()" [disabled]="loading">Refresh</button></header>
-      <section *ngIf="canManageRoles" class="create-panel">
+      <header><div><p class="eyebrow">Access management</p><h1>People and roles</h1><p>{{ accessSummary }}</p></div><button type="button" class="btn btn-secondary" (click)="load()" [disabled]="loading">Refresh</button></header>
+      <section *ngIf="canCreateAccounts" class="create-panel">
         <h2>Create an operational account</h2>
         <p>Head Managers can create Buyer, Seller, Sales Manager, and Warehouse accounts. Leadership and security roles are assigned only through the protected administrator workflow.</p>
         <form #accountForm="ngForm" (ngSubmit)="createAccount()">
@@ -55,11 +55,23 @@ export class UserManagementComponent implements OnInit {
   ) {}
 
   get canManageRoles(): boolean {
+    return this.currentRole === 'head_manager' || this.currentRole === 'security_manager' || this.currentRole === 'admin';
+  }
+
+  get canCreateAccounts(): boolean {
     return this.currentRole === 'head_manager' || this.currentRole === 'admin';
   }
 
   get canManageStatus(): boolean {
     return this.currentRole === 'security_manager' || this.currentRole === 'admin';
+  }
+
+  get accessSummary(): string {
+    if (this.currentRole === 'security_manager') {
+      return 'Change operational role assignments and activate or disable ordinary accounts. Every change requires a recorded reason.';
+    }
+    if (this.canCreateAccounts) return 'Create operational accounts and assign day-to-day roles.';
+    return 'Review account availability and protect access.';
   }
 
   get filteredUsers(): User[] {
@@ -95,10 +107,20 @@ export class UserManagementComponent implements OnInit {
     const select = event.target as HTMLSelectElement;
     const nextRole = select.value as UserRole;
     if (nextRole === user.role || this.pendingId !== null) return;
+    let reason: string | undefined;
+    if (this.currentRole === 'security_manager') {
+      reason = window.prompt(`Provide a security reason for changing ${user.email} to ${this.label(nextRole)}:`)?.trim();
+      if (!reason || reason.length < 3) {
+        select.value = user.role;
+        this.hasError = true;
+        this.message = 'Provide a meaningful reason of at least 3 characters for a security role change.';
+        return;
+      }
+    }
     this.pendingId = user.id;
     this.hasError = false;
     this.message = '';
-    this.api.updateUserRole(user.id, nextRole).subscribe({
+    this.api.updateUserRole(user.id, nextRole, reason).subscribe({
       next: updated => {
         this.replace(updated);
         this.pendingId = null;
@@ -114,7 +136,7 @@ export class UserManagementComponent implements OnInit {
   }
 
   createAccount(): void {
-    if (!this.canManageRoles || this.creating) return;
+    if (!this.canCreateAccounts || this.creating) return;
     this.creating = true;
     this.hasError = false;
     this.message = '';
@@ -143,9 +165,9 @@ export class UserManagementComponent implements OnInit {
     if (this.pendingId !== null) return;
     const nextIsActive = user.is_active === false;
     const reason = window.prompt(`Provide a reason to ${nextIsActive ? 'enable' : 'disable'} ${user.email}:`);
-    if (!reason?.trim()) {
+    if (!reason?.trim() || reason.trim().length < 3) {
       this.hasError = true;
-      this.message = 'A reason is required for an account status change.';
+      this.message = 'Provide a meaningful reason of at least 3 characters for an account status change.';
       return;
     }
     this.pendingId = user.id;
@@ -174,9 +196,8 @@ export class UserManagementComponent implements OnInit {
   }
 
   canChangeRole(user: User): boolean {
-    return this.canManageRoles && (
-      this.currentRole === 'admin' || !this.protectedRoles.includes(user.role)
-    );
+    if (!this.canManageRoles || user.id === this.auth.currentUser?.id) return false;
+    return this.currentRole === 'admin' || !this.protectedRoles.includes(user.role);
   }
 
   canToggleStatus(user: User): boolean {

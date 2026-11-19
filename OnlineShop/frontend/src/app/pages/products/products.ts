@@ -64,6 +64,7 @@ import { apiErrorMessage, collectionItems } from '../../utils/http';
           <div class="card-body">
             <span class="category">{{ product.category_name || categoryName(product.category) }}</span>
             <h2><a [routerLink]="['/products', product.id]">{{ product.name }}</a></h2>
+            <p class="rating" [attr.aria-label]="ratingLabel(product)"><span aria-hidden="true">★</span><strong>{{ product.average_rating ?? 0 | number:'1.1-1' }}</strong><span>({{ product.rating_count ?? 0 }})</span></p>
             <p class="description">{{ product.description || 'Product details are available on its page.' }}</p>
             <div class="card-footer">
               <strong>{{ product.price | number:'1.0-2' }} KZT</strong>
@@ -104,7 +105,7 @@ import { apiErrorMessage, collectionItems } from '../../utils/http';
     .stock.low { background: #fffbeb; color: #92400e; }.stock.out { background: #fef2f2; color: #b91c1c; }
     .card-body { display: flex; flex: 1; flex-direction: column; gap: 10px; padding: 17px; }
     h2 { font-size: 1.05rem; line-height: 1.3; }.card-body h2 a:hover { color: var(--primary-dark); }
-    .description { min-height: 43px; color: var(--text-light); font-size: .88rem; line-height: 1.45; }
+    .rating { display: flex; align-items: center; gap: 5px; color: var(--text-light); font-size: .82rem; }.rating > span:first-child { color: #eab308; font-size: 1rem; }.rating strong { color: var(--secondary); }.description { min-height: 43px; color: var(--text-light); font-size: .88rem; line-height: 1.45; }
     .card-footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .card-footer strong { color: var(--secondary); }.add { padding: 8px 11px; }.add:disabled { opacity: .55; cursor: not-allowed; }
     @media (max-width: 900px) { .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -194,6 +195,12 @@ export class ProductsComponent implements OnInit {
     if (stock <= 0) return 'Sold out';
     if (stock <= 10) return `${stock} left`;
     return 'In stock';
+  }
+
+  ratingLabel(product: Product): string {
+    const rating = product.average_rating ?? 0;
+    const count = product.rating_count ?? 0;
+    return `${rating.toFixed(1)} out of 5 from ${count} ${count === 1 ? 'review' : 'reviews'}`;
   }
 
   private loadCategories(): void {

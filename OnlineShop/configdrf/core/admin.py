@@ -3,13 +3,18 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from .models import (
     Category,
+    CustomerNotification,
     Order,
     OrderItem,
     Payment,
     Product,
+    ProductReview,
     ProductStockAdjustment,
     SecurityAuditLog,
+    SupportTicket,
     User,
+    WaitlistItem,
+    WishlistItem,
 )
 
 
@@ -67,6 +72,29 @@ class ProductAdmin(admin.ModelAdmin):
     search_fields = ('name', 'sku')
 
 
+@admin.register(ProductReview)
+class ProductReviewAdmin(admin.ModelAdmin):
+    list_display = ('product', 'user', 'rating', 'created_at', 'updated_at')
+    list_filter = ('rating', 'created_at')
+    search_fields = ('product__name', 'user__email', 'comment')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(WishlistItem)
+class WishlistItemAdmin(admin.ModelAdmin):
+    list_display = ('user', 'product', 'created_at')
+    search_fields = ('user__email', 'product__name')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(WaitlistItem)
+class WaitlistItemAdmin(admin.ModelAdmin):
+    list_display = ('user', 'product', 'is_active', 'created_at', 'notified_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('user__email', 'product__name')
+    readonly_fields = ('created_at', 'notified_at')
+
+
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
     list_display = ('order', 'amount', 'method', 'card_brand', 'card_last4', 'status', 'paid_at')
@@ -84,6 +112,25 @@ class ReadOnlyAuditAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(CustomerNotification)
+class CustomerNotificationAdmin(ReadOnlyAuditAdmin):
+    list_display = ('user', 'notification_type', 'product', 'is_read', 'created_at')
+    list_filter = ('notification_type', 'is_read', 'created_at')
+    search_fields = ('user__email', 'product__name', 'title', 'message')
+    readonly_fields = (
+        'user', 'product', 'notification_type', 'title', 'message', 'is_read',
+        'created_at', 'read_at',
+    )
+
+
+@admin.register(SupportTicket)
+class SupportTicketAdmin(admin.ModelAdmin):
+    list_display = ('id', 'subject', 'customer', 'status', 'handled_by', 'updated_at')
+    list_filter = ('status', 'category', 'created_at')
+    search_fields = ('subject', 'customer__email', 'message', 'response')
+    readonly_fields = ('created_at', 'updated_at', 'resolved_at')
 
 
 @admin.register(ProductStockAdjustment)

@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Avg, F
 from rest_framework import serializers
 
 from .audit import record_audit_event
@@ -13,9 +13,14 @@ from .models import (
     OrderItem,
     Payment,
     Product,
+    ProductReview,
     ProductStockAdjustment,
     SecurityAuditLog,
+    CustomerNotification,
+    SupportTicket,
     User,
+    WaitlistItem,
+    WishlistItem,
 )
 
 
@@ -192,6 +197,17 @@ class RoleAssignmentSerializer(serializers.Serializer):
             User.ROLE_WAREHOUSE,
         )
     )
+    reason = serializers.CharField(
+        max_length=250,
+        trim_whitespace=True,
+        required=False,
+        allow_blank=False,
+    )
+
+    def validate_reason(self, value):
+        if len(value.strip()) < 3:
+            raise serializers.ValidationError('Provide a meaningful reason of at least 3 characters.')
+        return value.strip()
 
 
 class AccountStatusSerializer(serializers.Serializer):
@@ -216,13 +232,30 @@ class ProductSerializer(serializers.ModelSerializer):
     owner = serializers.PrimaryKeyRelatedField(read_only=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
     product_name = serializers.CharField(source='name', read_only=True)
+    average_rating = serializers.SerializerMethodField()
+    rating_count = serializers.SerializerMethodField()
+    units_sold = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = (
             'id', 'name', 'product_name', 'sku', 'price', 'description',
             'stock_qty', 'image_url', 'category', 'category_name', 'owner', 'is_active',
+            'average_rating', 'rating_count', 'units_sold',
         )
+
+    def get_average_rating(self, obj):
+        average = getattr(obj, 'average_rating', None)
+        if average is None:
+            average = obj.reviews.aggregate(average=Avg('rating'))['average']
+        return round(float(average or 0), 2)
+
+    def get_rating_count(self, obj):
+        count = getattr(obj, 'rating_count', None)
+        return int(count if count is not None else obj.reviews.count())
+
+    def get_units_sold(self, obj):
+        return int(getattr(obj, 'units_sold', 0) or 0)
 
     def validate_price(self, value):
         if value <= 0:
@@ -244,6 +277,132 @@ class ProductSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError('SKU cannot be blank.')
         return value
+
+
+class PublicUserSerializer(serializers.ModelSerializer):
+    """Public, non-contact identity data used in reviews and support responses."""
+
+    class Meta:
+        model = User
+        fields = ('id', 'first_name', 'last_name')
+        read_only_fields = fields
+
+
+class ProductReviewSerializer(serializers.ModelSerializer):
+    user = PublicUserSerializer(read_only=True)
+    is_owner = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductReview
+        fields = (
+            'id', 'product', 'user', 'rating', 'comment', 'created_at', 'updated_at',
+            'is_owner',
+        )
+        read_only_fields = ('id', 'product', 'user', 'created_at', 'updated_at', 'is_owner')
+
+    def get_is_owner(self, obj):
+        request = self.context.get('request')
+        return bool(
+            request
+            and getattr(request.user, 'is_authenticated', False)
+            and obj.user_id == request.user.id
+        )
+
+    def validate_comment(self, value):
+        return value.strip()
+
+
+class WishlistItemSerializer(serializers.ModelSerializer):
+    product_detail = ProductSerializer(source='product', read_only=True)
+    waitlisted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WishlistItem
+        fields = ('id', 'product', 'product_detail', 'created_at', 'waitlisted')
+        read_only_fields = ('id', 'product_detail', 'created_at', 'waitlisted')
+
+    def get_waitlisted(self, obj):
+        return WaitlistItem.objects.filter(
+            user_id=obj.user_id,
+            product_id=obj.product_id,
+            is_active=True,
+        ).exists()
+
+
+class WaitlistItemSerializer(serializers.ModelSerializer):
+    product_detail = ProductSerializer(source='product', read_only=True)
+
+    class Meta:
+        model = WaitlistItem
+        fields = (
+            'id', 'product', 'product_detail', 'is_active', 'created_at', 'notified_at',
+        )
+        read_only_fields = ('id', 'product_detail', 'is_active', 'created_at', 'notified_at')
+
+
+class CustomerNotificationSerializer(serializers.ModelSerializer):
+    type = serializers.CharField(source='notification_type', read_only=True)
+    product_detail = ProductSerializer(source='product', read_only=True)
+
+    class Meta:
+        model = CustomerNotification
+        fields = (
+            'id', 'type', 'title', 'message', 'product', 'product_detail',
+            'is_read', 'created_at', 'read_at',
+        )
+        read_only_fields = fields
+
+
+class SupportTicketCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportTicket
+        fields = ('subject', 'message', 'category')
+
+    def validate_subject(self, value):
+        value = value.strip()
+        if len(value) < 3:
+            raise serializers.ValidationError('Subject must contain at least 3 characters.')
+        return value
+
+    def validate_message(self, value):
+        value = value.strip()
+        if len(value) < 5:
+            raise serializers.ValidationError('Message must contain at least 5 characters.')
+        return value
+
+
+class SupportTicketUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportTicket
+        fields = ('status', 'response')
+        extra_kwargs = {
+            'status': {'required': False},
+            'response': {'required': False, 'allow_blank': False},
+        }
+
+    def validate_response(self, value):
+        value = value.strip()
+        if len(value) < 2:
+            raise serializers.ValidationError('Response must contain at least 2 characters.')
+        return value
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError('Provide a status or response to update this ticket.')
+        return attrs
+
+
+class SupportTicketSerializer(serializers.ModelSerializer):
+    customer = PublicUserSerializer(read_only=True)
+    handled_by = PublicUserSerializer(read_only=True)
+
+    class Meta:
+        model = SupportTicket
+        fields = (
+            'id', 'customer', 'handled_by', 'subject', 'message', 'category', 'status',
+            'response', 'created_at', 'updated_at', 'resolved_at',
+        )
+        read_only_fields = fields
 
 
 class OrderItemSerializer(serializers.ModelSerializer):

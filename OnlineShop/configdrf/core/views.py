@@ -1,9 +1,22 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db import transaction
-from django.db.models import Count, DecimalField, F, Q, Sum
+from django.db import IntegrityError, transaction
+from django.db.models import (
+    Avg,
+    Count,
+    DecimalField,
+    F,
+    FloatField,
+    IntegerField,
+    OuterRef,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+)
 from django.db.models.deletion import ProtectedError
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, permissions, status
@@ -18,29 +31,41 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .audit import record_audit_event
 from .models import (
     Category,
+    CustomerNotification,
     Order,
     OrderItem,
     Payment,
     Product,
+    ProductReview,
     ProductStockAdjustment,
     SecurityAuditLog,
+    SupportTicket,
     User,
+    WaitlistItem,
+    WishlistItem,
 )
 from .serializers import (
     AccountDirectorySerializer,
     AccountStatusSerializer,
     CategorySerializer,
+    CustomerNotificationSerializer,
     ManagedAccountCreateSerializer,
     ManagedUserSerializer,
     OrderSerializer,
     PasswordChangeSerializer,
     ProductSerializer,
+    ProductReviewSerializer,
     ProductStockAdjustmentSerializer,
     ProductStockUpdateSerializer,
     ProfileSerializer,
     RoleAssignmentSerializer,
     SecurityAuditLogSerializer,
+    SupportTicketCreateSerializer,
+    SupportTicketSerializer,
+    SupportTicketUpdateSerializer,
     UserSerializer,
+    WaitlistItemSerializer,
+    WishlistItemSerializer,
 )
 
 
@@ -55,6 +80,15 @@ PROTECTED_ACCOUNT_ROLES = (
     User.ROLE_HEAD_MANAGER,
     User.ROLE_SECURITY_MANAGER,
 )
+
+
+def is_protected_account(user):
+    """Keep leadership and Django-administration accounts outside Security Manager control."""
+    return bool(
+        user.role in PROTECTED_ACCOUNT_ROLES
+        or getattr(user, 'is_superuser', False)
+        or getattr(user, 'is_staff', False)
+    )
 
 
 def is_system_administrator(user):
@@ -75,6 +109,115 @@ def has_role(user, *roles):
 
 def can_manage_catalog(user):
     return has_role(user, User.ROLE_MANAGER, User.ROLE_HEAD_MANAGER)
+
+
+def is_customer_account(user):
+    """Only customer-facing account types can create orders, reviews, and tickets."""
+    return bool(
+        getattr(user, 'is_authenticated', False)
+        and user.role in (User.ROLE_BUYER, User.ROLE_SELLER)
+    )
+
+
+def can_manage_support(user):
+    return has_role(
+        user,
+        User.ROLE_MANAGER,
+        User.ROLE_HEAD_MANAGER,
+        User.ROLE_SECURITY_MANAGER,
+    )
+
+
+def with_product_rating_metrics(queryset):
+    """Attach portable rating aggregates so list pages do not issue N+1 queries."""
+    return queryset.annotate(
+        average_rating=Coalesce(
+            Avg('reviews__rating'),
+            Value(0),
+            output_field=FloatField(),
+        ),
+        rating_count=Count('reviews', distinct=True),
+    )
+
+
+def notify_waitlisted_users_after_restock(product, previous_quantity):
+    """Create one in-app alert per active waitlist entry on a 0 -> positive restock.
+
+    This helper is called only from atomic, product-locked inventory paths.  It locks
+    matching waitlist rows before creating notifications and deactivating them, so a
+    retry or concurrent adjustment cannot send duplicate alerts.
+    """
+    if previous_quantity != 0 or product.stock_qty <= 0:
+        return 0
+
+    waiting_entries = list(
+        WaitlistItem.objects.select_for_update()
+        .select_related('user')
+        .filter(
+            product=product,
+            is_active=True,
+            notified_at__isnull=True,
+            user__is_active=True,
+        )
+    )
+    if not waiting_entries:
+        return 0
+
+    now = timezone.now()
+    CustomerNotification.objects.bulk_create([
+        CustomerNotification(
+            user=entry.user,
+            product=product,
+            notification_type=CustomerNotification.TYPE_WAITLIST_PRODUCT_AVAILABLE,
+            title='Product back in stock',
+            message=f'{product.name} is available again. Add it to your cart while stock lasts.',
+        )
+        for entry in waiting_entries
+    ])
+    WaitlistItem.objects.filter(pk__in=[entry.pk for entry in waiting_entries]).update(
+        is_active=False,
+        notified_at=now,
+    )
+    record_audit_event(
+        'waitlist_restock_notifications_sent',
+        product=product,
+        metadata={'recipient_count': len(waiting_entries)},
+    )
+    return len(waiting_entries)
+
+
+def restore_order_stock(order, *, save_to_wishlist=False):
+    """Restore a cancelled order's inventory and notify waitlisted customers safely."""
+    wishlisted_count = 0
+    notification_count = 0
+    for item in order.items.select_related('product').all():
+        product = Product.objects.select_for_update().get(pk=item.product_id)
+        previous_quantity = product.stock_qty
+        product.stock_qty = previous_quantity + item.quantity
+        product.save(update_fields=('stock_qty',))
+        notification_count += notify_waitlisted_users_after_restock(product, previous_quantity)
+        if save_to_wishlist:
+            _, created = WishlistItem.objects.get_or_create(user=order.user, product=product)
+            wishlisted_count += int(created)
+    return {
+        'wishlisted_count': wishlisted_count,
+        'notification_count': notification_count,
+    }
+
+
+def activate_waitlist_entry(user, product):
+    """Create or reactivate an explicit stock alert without duplicating its history."""
+    try:
+        entry = WaitlistItem.objects.select_for_update().get(user=user, product=product)
+        created = False
+    except WaitlistItem.DoesNotExist:
+        entry, created = WaitlistItem.objects.get_or_create(user=user, product=product)
+    if not created and not entry.is_active:
+        entry.is_active = True
+        entry.notified_at = None
+        entry.save(update_fields=('is_active', 'notified_at'))
+        return entry, True
+    return entry, created
 
 
 class IsSalesManager(permissions.BasePermission):
@@ -162,7 +305,9 @@ class CategoryDetail(APIView):
 class CategoryProducts(APIView):
     def get(self, request, id):
         category = get_object_or_404(Category, id=id, is_active=True)
-        products = Product.objects.filter(category=category, is_active=True).order_by('name')
+        products = with_product_rating_metrics(
+            Product.objects.select_related('category', 'owner').filter(category=category, is_active=True)
+        ).order_by('name', 'id')
         return Response(ProductSerializer(products, many=True).data)
 
 
@@ -196,6 +341,7 @@ class ProductsList(generics.ListCreateAPIView):
                 queryset = queryset.filter(
                     Q(name__icontains=term) | Q(description__icontains=term)
                 )
+        queryset = with_product_rating_metrics(queryset.select_related('category', 'owner'))
         if ordering in ('price', '-price', 'name', '-name'):
             queryset = queryset.order_by(ordering)
         else:
@@ -217,9 +363,50 @@ class ProductsList(generics.ListCreateAPIView):
         )
 
 
+class TopProducts(APIView):
+    """A public, deterministic top-products feed ranked by rating, review volume, then sales."""
+
+    def get(self, request):
+        try:
+            limit = min(max(int(request.query_params.get('limit', 10)), 1), 50)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError({'limit': 'Limit must be a whole number between 1 and 50.'}) from exc
+
+        sales_units = (
+            OrderItem.objects.filter(
+                product_id=OuterRef('pk'),
+                order__status__in=('Paid', 'Preparing', 'Shipped', 'Delivered'),
+            )
+            .order_by()
+            .values('product_id')
+            .annotate(total=Sum('quantity'))
+            .values('total')[:1]
+        )
+        products = (
+            with_product_rating_metrics(
+                Product.objects.select_related('category', 'owner').filter(
+                    category__is_active=True,
+                    is_active=True,
+                )
+            )
+            .annotate(
+                units_sold=Coalesce(
+                    Subquery(sales_units, output_field=IntegerField()),
+                    Value(0),
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by('-average_rating', '-rating_count', '-units_sold', 'name', 'id')[:limit]
+        )
+        return Response(ProductSerializer(products, many=True, context={'request': request}).data)
+
+
 class ProductDetail(APIView):
     def _get_product_for_read(self, request, id):
-        product = get_object_or_404(Product.objects.select_related('category', 'owner'), id=id)
+        product = get_object_or_404(
+            with_product_rating_metrics(Product.objects.select_related('category', 'owner')),
+            id=id,
+        )
         if product.is_active and product.category.is_active:
             return product
         if can_manage_catalog(request.user) or product.owner_id == getattr(request.user, 'id', None):
@@ -283,6 +470,114 @@ class ProductDetail(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class ProductReviewList(APIView):
+    """Public product feedback, with one authenticated customer review per product."""
+
+    @staticmethod
+    def _get_reviewable_product(id):
+        return get_object_or_404(
+            Product.objects.select_related('category').filter(
+                is_active=True,
+                category__is_active=True,
+            ),
+            id=id,
+        )
+
+    def get(self, request, id):
+        product = self._get_reviewable_product(id)
+        reviews = ProductReview.objects.filter(product=product).select_related('user')
+        return Response(ProductReviewSerializer(reviews, many=True, context={'request': request}).data)
+
+    @transaction.atomic
+    def post(self, request, id):
+        if not is_customer_account(request.user):
+            raise PermissionDenied('Only customer accounts can submit product reviews.')
+        product = self._get_reviewable_product(id)
+        if ProductReview.objects.filter(product=product, user=request.user).exists():
+            raise ValidationError({'detail': 'You have already reviewed this product. Edit your existing review instead.'})
+        unexpected_fields = set(request.data) - {'rating', 'comment'}
+        if unexpected_fields:
+            raise ValidationError({'detail': 'Only rating and comment can be submitted for a review.'})
+        serializer = ProductReviewSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        try:
+            # Keep the unique database constraint as the final authority when two
+            # browser requests arrive at the same time.
+            with transaction.atomic():
+                review = serializer.save(product=product, user=request.user)
+        except IntegrityError as exc:
+            raise ValidationError({
+                'detail': 'You have already reviewed this product. Edit your existing review instead.'
+            }) from exc
+        record_audit_event(
+            'product_review_created',
+            actor=request.user,
+            target_user=request.user,
+            product=product,
+            metadata={'review_id': review.id, 'rating': review.rating},
+        )
+        return Response(
+            ProductReviewSerializer(review, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ProductReviewDetail(APIView):
+    @staticmethod
+    def _get_review(request, id, review_id):
+        return get_object_or_404(
+            ProductReview.objects.select_related('product', 'user').filter(
+                product_id=id,
+                product__is_active=True,
+                product__category__is_active=True,
+            ),
+            id=review_id,
+        )
+
+    @staticmethod
+    def _ensure_owner(request, review):
+        if not is_customer_account(request.user) or review.user_id != request.user.id:
+            raise PermissionDenied('You may only change your own review.')
+
+    def patch(self, request, id, review_id):
+        review = self._get_review(request, id, review_id)
+        self._ensure_owner(request, review)
+        unexpected_fields = set(request.data) - {'rating', 'comment'}
+        if unexpected_fields:
+            raise ValidationError({'detail': 'Only rating and comment can be updated for a review.'})
+        serializer = ProductReviewSerializer(
+            review,
+            data=request.data,
+            partial=True,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        updated_review = serializer.save()
+        record_audit_event(
+            'product_review_updated',
+            actor=request.user,
+            target_user=request.user,
+            product=review.product,
+            metadata={'review_id': review.id, 'rating': updated_review.rating},
+        )
+        return Response(ProductReviewSerializer(updated_review, context={'request': request}).data)
+
+    def delete(self, request, id, review_id):
+        review = self._get_review(request, id, review_id)
+        self._ensure_owner(request, review)
+        product = review.product
+        review_id = review.id
+        review.delete()
+        record_audit_event(
+            'product_review_deleted',
+            actor=request.user,
+            target_user=request.user,
+            product=product,
+            metadata={'review_id': review_id},
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class ProductStock(APIView):
     permission_classes = [IsWarehouseStaff]
 
@@ -309,6 +604,7 @@ class ProductStock(APIView):
             delta=new_quantity - previous_quantity,
             reason=serializer.validated_data['reason'],
         )
+        notification_count = notify_waitlisted_users_after_restock(product, previous_quantity)
         record_audit_event(
             'stock_adjusted',
             actor=request.user,
@@ -317,6 +613,7 @@ class ProductStock(APIView):
                 'previous_quantity': previous_quantity,
                 'new_quantity': new_quantity,
                 'reason': adjustment.reason,
+                'waitlist_notification_count': notification_count,
             },
         )
         return Response(ProductSerializer(product).data)
@@ -333,6 +630,174 @@ class ProductStockHistory(APIView):
         except (TypeError, ValueError) as exc:
             raise ValidationError({'limit': 'Limit must be a whole number.'}) from exc
         return Response(ProductStockAdjustmentSerializer(history[:limit], many=True).data)
+
+
+class WishlistList(APIView):
+    """Customer saved products. Saving an out-of-stock item also starts a stock alert."""
+
+    def _ensure_customer(self, request):
+        if not is_customer_account(request.user):
+            raise PermissionDenied('Only customer accounts can use a wishlist.')
+
+    def get(self, request):
+        self._ensure_customer(request)
+        items = (
+            WishlistItem.objects.filter(user=request.user)
+            .select_related('product__category', 'product__owner')
+        )
+        return Response(WishlistItemSerializer(items, many=True, context={'request': request}).data)
+
+    @transaction.atomic
+    def post(self, request):
+        self._ensure_customer(request)
+        serializer = WishlistItemSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        # Lock the product before its stock is inspected so a concurrent restock
+        # cannot leave a newly created waitlist entry without its alert.
+        product = get_object_or_404(
+            Product.objects.select_for_update().select_related('category'),
+            pk=serializer.validated_data['product'].pk,
+        )
+        if not product.is_active or not product.category.is_active:
+            raise ValidationError({'product': 'Only active catalogue products can be saved.'})
+        item, created = WishlistItem.objects.get_or_create(user=request.user, product=product)
+        automatically_waitlisted = False
+        if product.stock_qty == 0:
+            _, automatically_waitlisted = activate_waitlist_entry(request.user, product)
+        if created:
+            record_audit_event(
+                'wishlist_item_saved',
+                actor=request.user,
+                target_user=request.user,
+                product=product,
+                metadata={'automatically_waitlisted': automatically_waitlisted},
+            )
+        if automatically_waitlisted:
+            record_audit_event(
+                'waitlist_enrolled',
+                actor=request.user,
+                target_user=request.user,
+                product=product,
+                metadata={'source': 'wishlist_zero_stock'},
+            )
+        return Response(
+            WishlistItemSerializer(item, context={'request': request}).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class WishlistDetail(APIView):
+    @transaction.atomic
+    def delete(self, request, product_id):
+        if not is_customer_account(request.user):
+            raise PermissionDenied('Only customer accounts can use a wishlist.')
+        item = get_object_or_404(WishlistItem, user=request.user, product_id=product_id)
+        product = item.product
+        item.delete()
+        record_audit_event(
+            'wishlist_item_removed',
+            actor=request.user,
+            target_user=request.user,
+            product=product,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WaitlistList(APIView):
+    """Explicit out-of-stock alerts; re-enrollment is possible after a prior alert."""
+
+    def _ensure_customer(self, request):
+        if not is_customer_account(request.user):
+            raise PermissionDenied('Only customer accounts can use a waiting list.')
+
+    def get(self, request):
+        self._ensure_customer(request)
+        entries = (
+            WaitlistItem.objects.filter(user=request.user)
+            .select_related('product__category', 'product__owner')
+        )
+        return Response(WaitlistItemSerializer(entries, many=True, context={'request': request}).data)
+
+    @transaction.atomic
+    def post(self, request):
+        self._ensure_customer(request)
+        serializer = WaitlistItemSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        # This uses the same product row lock as warehouse/cancellation restocks.
+        # The availability check and enrollment therefore form one atomic decision.
+        product = get_object_or_404(
+            Product.objects.select_for_update().select_related('category'),
+            pk=serializer.validated_data['product'].pk,
+        )
+        if not product.is_active or not product.category.is_active:
+            raise ValidationError({'product': 'Only active catalogue products can be waitlisted.'})
+        if product.stock_qty > 0:
+            raise ValidationError({'product': 'This product is currently in stock and does not need a waiting list alert.'})
+        entry, activated = activate_waitlist_entry(request.user, product)
+        if activated:
+            record_audit_event(
+                'waitlist_enrolled',
+                actor=request.user,
+                target_user=request.user,
+                product=product,
+                metadata={'source': 'waiting_list'},
+            )
+        return Response(
+            WaitlistItemSerializer(entry, context={'request': request}).data,
+            status=status.HTTP_201_CREATED if activated else status.HTTP_200_OK,
+        )
+
+
+class WaitlistDetail(APIView):
+    @transaction.atomic
+    def delete(self, request, product_id):
+        if not is_customer_account(request.user):
+            raise PermissionDenied('Only customer accounts can use a waiting list.')
+        entry = get_object_or_404(
+            WaitlistItem,
+            user=request.user,
+            product_id=product_id,
+            is_active=True,
+        )
+        entry.is_active = False
+        entry.save(update_fields=('is_active',))
+        record_audit_event(
+            'waitlist_removed',
+            actor=request.user,
+            target_user=request.user,
+            product=entry.product,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CustomerNotificationList(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        notifications = CustomerNotification.objects.filter(user=request.user).select_related(
+            'product__category',
+            'product__owner',
+        )
+        unread = request.query_params.get('unread', '').lower()
+        if unread in ('1', 'true', 'yes'):
+            notifications = notifications.filter(is_read=False)
+        return Response(CustomerNotificationSerializer(
+            notifications[:100],
+            many=True,
+            context={'request': request},
+        ).data)
+
+
+class CustomerNotificationRead(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, id):
+        notification = get_object_or_404(CustomerNotification, id=id, user=request.user)
+        if not notification.is_read:
+            notification.is_read = True
+            notification.read_at = timezone.now()
+            notification.save(update_fields=('is_read', 'read_at'))
+        return Response(CustomerNotificationSerializer(notification, context={'request': request}).data)
 
 
 class CurrentUser(APIView):
@@ -376,6 +841,112 @@ class CurrentUserPassword(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class SupportTicketList(APIView):
+    """Customer support inbox with customer ownership and a staff-only response path."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        tickets = SupportTicket.objects.select_related('customer', 'handled_by')
+        if not can_manage_support(request.user):
+            tickets = tickets.filter(customer=request.user)
+        return Response(SupportTicketSerializer(tickets, many=True, context={'request': request}).data)
+
+    def post(self, request):
+        if not is_customer_account(request.user):
+            raise PermissionDenied('Only customer accounts can open a support ticket.')
+        serializer = SupportTicketCreateSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        ticket = serializer.save(customer=request.user)
+        record_audit_event(
+            'support_ticket_created',
+            actor=request.user,
+            target_user=request.user,
+            metadata={'ticket_id': ticket.id, 'category': ticket.category},
+        )
+        return Response(
+            SupportTicketSerializer(ticket, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class SupportTicketDetail(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    _ALLOWED_TRANSITIONS = {
+        SupportTicket.STATUS_OPEN: {
+            SupportTicket.STATUS_IN_PROGRESS,
+            SupportTicket.STATUS_RESOLVED,
+            SupportTicket.STATUS_CLOSED,
+        },
+        SupportTicket.STATUS_IN_PROGRESS: {
+            SupportTicket.STATUS_OPEN,
+            SupportTicket.STATUS_RESOLVED,
+            SupportTicket.STATUS_CLOSED,
+        },
+        SupportTicket.STATUS_RESOLVED: {
+            SupportTicket.STATUS_OPEN,
+            SupportTicket.STATUS_CLOSED,
+        },
+        SupportTicket.STATUS_CLOSED: {SupportTicket.STATUS_OPEN},
+    }
+
+    @transaction.atomic
+    def patch(self, request, id):
+        if not can_manage_support(request.user):
+            raise PermissionDenied('Only support management accounts can update support tickets.')
+        ticket = get_object_or_404(
+            SupportTicket.objects.select_for_update().select_related('customer', 'handled_by'),
+            id=id,
+        )
+        serializer = SupportTicketUpdateSerializer(ticket, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        updates = serializer.validated_data
+        previous_status = ticket.status
+        new_status = updates.get('status', previous_status)
+        if new_status != previous_status and new_status not in self._ALLOWED_TRANSITIONS[previous_status]:
+            raise ValidationError({
+                'status': f'Cannot change {previous_status} support ticket to {new_status}.',
+            })
+
+        changed_fields = []
+        if 'status' in updates:
+            ticket.status = new_status
+            changed_fields.append('status')
+        if 'response' in updates:
+            ticket.response = updates['response']
+            changed_fields.append('response')
+        ticket.handled_by = request.user
+        changed_fields.append('handled_by')
+        if new_status in (SupportTicket.STATUS_RESOLVED, SupportTicket.STATUS_CLOSED):
+            if ticket.resolved_at is None:
+                ticket.resolved_at = timezone.now()
+                changed_fields.append('resolved_at')
+        elif previous_status in (SupportTicket.STATUS_RESOLVED, SupportTicket.STATUS_CLOSED):
+            ticket.resolved_at = None
+            changed_fields.append('resolved_at')
+        changed_fields.append('updated_at')
+        ticket.save(update_fields=tuple(dict.fromkeys(changed_fields)))
+        CustomerNotification.objects.create(
+            user=ticket.customer,
+            notification_type=CustomerNotification.TYPE_SUPPORT_TICKET_UPDATED,
+            title='Support ticket updated',
+            message=f'Your support ticket #{ticket.id} is now {ticket.status}.',
+        )
+        record_audit_event(
+            'support_ticket_updated',
+            actor=request.user,
+            target_user=ticket.customer,
+            metadata={
+                'ticket_id': ticket.id,
+                'previous_status': previous_status,
+                'new_status': ticket.status,
+                'changed_fields': changed_fields,
+            },
+        )
+        return Response(SupportTicketSerializer(ticket, context={'request': request}).data)
+
+
 class UserList(APIView):
     """Account directory and account creation for leadership/security workflows."""
 
@@ -406,14 +977,29 @@ class UserList(APIView):
 
 
 class UserRole(APIView):
-    permission_classes = [IsHeadManager]
-
     def patch(self, request, id):
+        if not (
+            has_role(request.user, User.ROLE_HEAD_MANAGER)
+            or has_role(request.user, User.ROLE_SECURITY_MANAGER)
+        ):
+            raise PermissionDenied('Only Head Managers and Security Managers can reassign operational roles.')
         user = get_object_or_404(User, id=id)
-        if user.role in PROTECTED_ACCOUNT_ROLES and not is_system_administrator(request.user):
+        is_security_manager = (
+            request.user.role == User.ROLE_SECURITY_MANAGER
+            and not is_system_administrator(request.user)
+        )
+        if is_security_manager and (
+            user.id == request.user.id or is_protected_account(user)
+        ):
+            raise PermissionDenied(
+                'Security managers cannot reassign protected accounts or their own account.'
+            )
+        if is_protected_account(user) and not is_system_administrator(request.user):
             raise PermissionDenied('Protected leadership and security accounts cannot be reassigned here.')
         serializer = RoleAssignmentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if is_security_manager and not serializer.validated_data.get('reason'):
+            raise ValidationError({'reason': 'Security managers must record a reason for a role change.'})
         previous_role = user.role
         user.role = serializer.validated_data['role']
         user.save(update_fields=('role',))
@@ -421,9 +1007,15 @@ class UserRole(APIView):
             'account_role_changed',
             actor=request.user,
             target_user=user,
-            metadata={'previous_role': previous_role, 'new_role': user.role},
+            metadata={
+                'previous_role': previous_role,
+                'new_role': user.role,
+                'reason': serializer.validated_data.get('reason', ''),
+                'performed_by_security_manager': is_security_manager,
+            },
         )
-        return Response(ManagedUserSerializer(user).data)
+        serializer_class = AccountDirectorySerializer if is_security_manager else ManagedUserSerializer
+        return Response(serializer_class(user).data)
 
 
 class UserStatus(APIView):
@@ -433,7 +1025,7 @@ class UserStatus(APIView):
         user = get_object_or_404(User, id=id)
         if (
             not is_system_administrator(request.user)
-            and (user.id == request.user.id or user.role in PROTECTED_ACCOUNT_ROLES)
+            and (user.id == request.user.id or is_protected_account(user))
         ):
             raise PermissionDenied('Security managers cannot change protected accounts or their own account.')
         serializer = AccountStatusSerializer(data=request.data)
@@ -535,11 +1127,9 @@ class OrderDetail(APIView):
         ):
             raise ValidationError({'status': 'Payment must be confirmed before preparation or shipment.'})
         previous_status = order.status
+        restock_result = {'wishlisted_count': 0, 'notification_count': 0}
         if new_status == 'Cancelled':
-            for item in order.items.select_related('product'):
-                Product.objects.filter(pk=item.product_id).update(
-                    stock_qty=F('stock_qty') + item.quantity
-                )
+            restock_result = restore_order_stock(order)
             payment.status = 'Refunded' if payment.status == 'Paid' else 'Failed'
         elif new_status == 'Paid' or (
             new_status == 'Delivered'
@@ -556,7 +1146,11 @@ class OrderDetail(APIView):
             actor=request.user,
             target_user=order.user,
             order=order,
-            metadata={'previous_status': previous_status, 'new_status': new_status},
+            metadata={
+                'previous_status': previous_status,
+                'new_status': new_status,
+                'waitlist_notification_count': restock_result['notification_count'],
+            },
         )
         return Response(OrderSerializer(order, context={'request': request}).data)
 
@@ -569,10 +1163,7 @@ class OrderDetail(APIView):
         )
         if order.status != 'New':
             raise ValidationError('Only new orders can be cancelled by the customer.')
-        for item in order.items.all():
-            Product.objects.filter(pk=item.product_id).update(
-                stock_qty=F('stock_qty') + item.quantity
-            )
+        restock_result = restore_order_stock(order, save_to_wishlist=True)
         order.payment.status = 'Failed'
         order.payment.save(update_fields=('status',))
         order.status = 'Cancelled'
@@ -582,6 +1173,10 @@ class OrderDetail(APIView):
             actor=request.user,
             target_user=request.user,
             order=order,
+            metadata={
+                'wishlisted_item_count': restock_result['wishlisted_count'],
+                'waitlist_notification_count': restock_result['notification_count'],
+            },
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -663,6 +1258,10 @@ class DashboardOverview(APIView):
             row['status']: row['count']
             for row in Order.objects.values('status').annotate(count=Count('id'))
         }
+        support_status_counts = {
+            row['status']: row['count']
+            for row in SupportTicket.objects.values('status').annotate(count=Count('id'))
+        }
         products = Product.objects.all()
         return Response({
             'period_days': 30,
@@ -675,6 +1274,10 @@ class DashboardOverview(APIView):
             'active_customers': User.objects.filter(
                 role__in=(User.ROLE_BUYER, User.ROLE_SELLER),
                 is_active=True,
+            ).count(),
+            'support_tickets_by_status': support_status_counts,
+            'open_support_tickets': SupportTicket.objects.filter(
+                status__in=(SupportTicket.STATUS_OPEN, SupportTicket.STATUS_IN_PROGRESS),
             ).count(),
         })
 
