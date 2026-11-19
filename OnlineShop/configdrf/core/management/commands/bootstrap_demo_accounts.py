@@ -15,7 +15,19 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--password', help='Initial password for newly-created demo accounts.')
-        parser.add_argument('--domain', default='onlineshop.test', help='Email domain for the demo accounts.')
+        parser.add_argument(
+            '--domain',
+            default='quickmart.test',
+            help='Email domain for the demo accounts (default: quickmart.test).',
+        )
+        parser.add_argument(
+            '--reset-existing',
+            action='store_true',
+            help=(
+                'Reset only the six named demo accounts to the supplied password and reactivate them. '
+                'Existing orders, listings, and all other accounts are preserved.'
+            ),
+        )
 
     def handle(self, *args, **options):
         password = options['password']
@@ -56,5 +68,21 @@ class Command(BaseCommand):
                 user.set_password(password)
                 user.save(update_fields=('password',))
                 self.stdout.write(self.style.SUCCESS(f'Created {role}: {email}'))
+            elif options['reset_existing']:
+                # Preserve the user primary key and all related rows such as orders,
+                # listings, support tickets, and audit events.  Only restore fields
+                # needed for a known, active demonstration login.
+                user.first_name = first_name
+                user.last_name = last_name
+                user.role = role
+                user.is_active = True
+                user.set_password(password)
+                user.save(update_fields=(
+                    'first_name', 'last_name', 'role', 'is_active', 'password',
+                ))
+                self.stdout.write(self.style.SUCCESS(f'Restored active {role}: {email}'))
             else:
-                self.stdout.write(f'Skipped existing account: {email}')
+                self.stdout.write(
+                    f'Skipped existing account: {email} '
+                    '(use --reset-existing to restore its supplied password)'
+                )

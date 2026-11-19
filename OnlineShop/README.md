@@ -54,6 +54,29 @@ npm start
 
 Open `http://localhost:4200`. The Angular development proxy sends `/api` requests to Django at `http://127.0.0.1:8000`.
 
+## Restore local demo access
+
+The six role-demo accounts below are active in the supplied local database and use the shared **local-demo-only** password `QuickMartDemo2026!`. Do not use this password outside a classroom/demo environment.
+
+| Role | Email |
+| --- | --- |
+| Buyer | `buyer.demo@quickmart.test` |
+| Seller | `seller.demo@quickmart.test` |
+| Sales Manager | `sales.manager@quickmart.test` |
+| Warehouse Staff | `warehouse.staff@quickmart.test` |
+| Head Manager | `head.manager@quickmart.test` |
+| Security Manager | `security.manager@quickmart.test` |
+
+If these accounts are changed later, restore only these six accounts without deleting any users, orders, listings, tickets, or other data:
+
+```powershell
+$env:DJANGO_SECRET_KEY = 'your-local-development-secret'
+$env:DJANGO_DEBUG = 'True'
+python configdrf/manage.py bootstrap_demo_accounts --password 'QuickMartDemo2026!' --reset-existing
+```
+
+The recovery command intentionally leaves every other pre-existing account untouched. Passwords for older arbitrary accounts cannot be recovered from Django password hashes; reset only the specific account you own if access is required.
+
 ## Run with PostgreSQL
 
 The local PostgreSQL service, environment-file template, migrations, validation commands, indexed-search notes, and production precautions are in [docs/POSTGRESQL_DEPLOYMENT.md](docs/POSTGRESQL_DEPLOYMENT.md). Use the supplied Compose configuration rather than exposing a database port publicly. The project was configured where Docker was unavailable, so perform the documented live migration, extension, vendor, and query-plan checks on the deployment machine.

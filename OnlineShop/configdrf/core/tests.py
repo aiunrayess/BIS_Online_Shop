@@ -1,6 +1,8 @@
 from decimal import Decimal
+from io import StringIO
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -519,6 +521,46 @@ class RoleOperationsTests(TestCase):
         another_refresh = RefreshToken.for_user(self.seller)
         forbidden = self.client.post('/api/logout/', {'refresh': str(another_refresh)}, format='json')
         self.assertEqual(forbidden.status_code, 403)
+
+
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
+class DemoAccountRecoveryTests(TestCase):
+    """The recovery command must fix demo access without deleting user-owned data."""
+
+    def test_reset_existing_restores_demo_access_and_preserves_related_rows(self):
+        account = User.objects.create_user(
+            email='buyer.demo@quickmart.test',
+            password='DifferentPassword!123',
+            role=User.ROLE_SELLER,
+            first_name='Changed',
+            is_active=False,
+        )
+        category = Category.objects.create(name='Recovery command category')
+        product = Product.objects.create(
+            name='Preserved listing',
+            price='10.00',
+            description='Listing that must remain owned by the same restored account.',
+            stock_qty=1,
+            category=category,
+            owner=account,
+        )
+        original_id = account.id
+
+        call_command(
+            'bootstrap_demo_accounts',
+            '--password',
+            'QuickMartDemo2026!',
+            '--reset-existing',
+            stdout=StringIO(),
+        )
+
+        account.refresh_from_db()
+        product.refresh_from_db()
+        self.assertEqual(account.id, original_id)
+        self.assertEqual(account.role, User.ROLE_BUYER)
+        self.assertTrue(account.is_active)
+        self.assertTrue(account.check_password('QuickMartDemo2026!'))
+        self.assertEqual(product.owner_id, original_id)
 
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
